@@ -39,7 +39,8 @@ public class ReadNfcV extends Object implements TagTechnology {
 //	protected Tag mytag; // can be retrieved through mynfcv
 	
 	private final String TAG=this.getClass().getName();
-	protected final int maxtries=3;
+	protected final int maxretry=3;
+	public int lastretried=0;
 	
 	protected boolean isTainted=true; // Tag info already read?
 	protected byte[] mysysinfo=null;	// NfcV SystemInformation - or generated
@@ -260,8 +261,9 @@ public class ReadNfcV extends Object implements TagTechnology {
 		// TODO background!
 		try {
 			if(!mynfcv.isConnected()) return res;
-			for(int t=maxtries;t>0;t++){ // retry reading
+			for(int t=0;t<=maxretry;t++){ // retry reading
 				res=mynfcv.transceive(command);
+				lastretried=t; // keep last count
 				if(0==res[0]) break;
 			}
 		} 
