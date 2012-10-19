@@ -75,7 +75,9 @@ public class ReadNfcV extends Object implements TagTechnology {
 //		Log.d(TAG,"getId: "+toHex(t.getId()));
 		mynfcv=NfcV.get(t);
 		try {
-			mynfcv.connect();
+			mynfcv.connect(); //TODO in background thread
+			Log.d(TAG,"getResponseFlags after connect: "+mynfcv.getResponseFlags()); 
+
 			mysysinfo=getSystemInformation(); 
 			// explore Nfcv properties..
 			//initfields(); // done by getSys..
@@ -93,7 +95,6 @@ public class ReadNfcV extends Object implements TagTechnology {
 			// init space for userdata ?
 			myuserdata= new byte[nBlocks*blocksize]; 
 		} catch (IOException e) {
-			// TODO Auto-generated catch block
 			lastErrorFlags=-1;
 			Log.d(TAG, "MyNfcV failed: "+e.getMessage());
 			e.printStackTrace();
@@ -241,8 +242,9 @@ public class ReadNfcV extends Object implements TagTechnology {
 	 */
 	protected byte[] transceive(byte cmd,int m, int n, byte[] in){
 			byte[] command;
-			byte[] res="transceive failed message".getBytes();
-		
+			byte[] res=" transceive failed message".getBytes();
+			res[0]=0x42; // pos 0 holds the error flag
+			
 		ByteArrayBuffer bab = new ByteArrayBuffer(128);
 		// flags: bit x=adressed, 
 		bab.append(0x00);
@@ -258,15 +260,13 @@ public class ReadNfcV extends Object implements TagTechnology {
 		Log.d(TAG,"transceive cmd: "+toHex(command));
 //		Log.d(TAG,"transceive cmd length: "+command.length);
 		
+		for(int t=0;t<=maxretry;t++){ // retry reading
 		// TODO background!
 		try {
-			if(!mynfcv.isConnected()) return res;
-			for(int t=0;t<=maxretry;t++){ // retry reading
+			if(!mynfcv.isConnected()) return "connect lost".getBytes();
 				res=mynfcv.transceive(command);
-				lastretried=t; // keep last count
-				if(0==res[0]) break;
 			}
-		} 
+		
 		catch (TagLostException e){ //TODO roll back user action
 			Log.e(TAG, "Tag lost "+e.getMessage());
 			try {
@@ -282,7 +282,6 @@ public class ReadNfcV extends Object implements TagTechnology {
 			return e.getMessage().getBytes();
 		}
 		finally{
-			Log.d(TAG,"getResponseFlags: "+mynfcv.getResponseFlags()); 
 			lastErrorFlags=res[0];
 			Log.d(TAG,"Flagbyte: "+String.format("%2x", lastErrorFlags));
 			if(0!=lastErrorFlags){
@@ -291,11 +290,13 @@ public class ReadNfcV extends Object implements TagTechnology {
 			}
 		}
 
-		if(0==mynfcv.getResponseFlags())
-			return (res);
-		else
-//			return new String("response Flags not 0").getBytes();
-			return res;
+		lastretried=t; // keep last count
+		if(0==res[0]) break;
+		Log.d(TAG,"transceive retry "+t);
+		}
+		Log.d(TAG,"transceive done after "+lastretried+" retries");
+
+		return res;
 	}
 
 	
