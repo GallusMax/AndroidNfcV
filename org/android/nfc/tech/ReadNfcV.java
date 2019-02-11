@@ -19,6 +19,7 @@ package org.android.nfc.tech;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.HashMap;
 
 import org.apache.http.util.ByteArrayBuffer;
@@ -37,8 +38,10 @@ import android.util.Log;
 public class ReadNfcV extends Object implements TagTechnology {
 	
 	// iso15693 flags
+	public static final byte FLAG_ZERO=0x00;
 	public static final byte FLAG_OPTION=0x40;
 	public static final byte FLAG_ADDRESSED=0x20;
+	public static final byte FLAG_SELECTED=0x10;
 	
 	protected NfcV mynfcv;
 //	protected Tag mytag; // can be retrieved through mynfcv
@@ -60,9 +63,9 @@ public class ReadNfcV extends Object implements TagTechnology {
 	public byte[] UID; // becomes valid when a real tag is contacted
 	public byte DSFID = -1;
 	public int maxtrans=0; // tag dependent max transceive length
-	public byte lastErrorFlags=-1; // re-set by each transceive
 	public byte lastErrorCode=-1; // re-set by each transceive
 	public byte manuByte=0;
+	private String lastErrorString;
 	
 	public static final byte BYTE_IDSTART=(byte)0xe0;
 	public static final byte MANU_TAGSYS=0x04;
@@ -77,18 +80,31 @@ public class ReadNfcV extends Object implements TagTechnology {
 	 */
 	public ReadNfcV(Tag t) {
 		UID = t.getId(); // sysinfo holds the UID in lsb order -  var Id will be filled lateron from sysinfo!
-		Log.d(TAG,"getId: "+toHex(t.getId()));
+		Log.d(TAG,"rawTag.getId(): "+toHex(t.getId()));
+		Log.d(TAG,"TechList: "+Arrays.toString(t.getTechList()));
+		Log.d(TAG,"t.toString: "+t.toString());
+		
 		mynfcv=NfcV.get(t);
 		try {
-			mynfcv.connect(); //TODO in background thread
-			Log.d(TAG,"getResponseFlags after connect: "+mynfcv.getResponseFlags()); 
-
+			if(mynfcv.isConnected()){
+				Log.d(TAG,"connected before connect()!");
+			}else 
+				Log.d(TAG,"isConnected returns false");
+			
+			mynfcv.connect(); // TODO find out why responseflags are 0x07
+			Log.d(TAG,"getResponseFlags() after connect: "+ String.format("0x%02x",mynfcv.getResponseFlags())); 
+			
+			if(mynfcv.isConnected()){
+				Log.d(TAG,"connected!");
+			}
+			DSFID=mynfcv.getDsfId();
+			Log.d(TAG,"getDsfId() after connect: "+ String.format("0x%02x",DSFID)); 
+				
 			mysysinfo=getSystemInformation(); 
 			// explore Nfcv properties..
 			//initfields(); // done by getSys..
 
 			maxtrans=mynfcv.getMaxTransceiveLength();
-			DSFID=mynfcv.getDsfId();
 			Log.d(TAG,nBlocks + " x " + blocksize + " bytes");
 			blocklocked=new byte[nBlocks]; // init the lock shadow
 //			getMultiSecStatus(0, nBlocks);	// and fill from tag TODO find out what crashes on Philips
@@ -100,9 +116,13 @@ public class ReadNfcV extends Object implements TagTechnology {
 			// init space for userdata ?
 			myuserdata= new byte[nBlocks*blocksize]; 
 		} catch (IOException e) {
-			lastErrorFlags=-1;
+			lastErrorCode=-1;
 			Log.d(TAG, "MyNfcV failed: "+e.getMessage());
 			e.printStackTrace();
+		}
+		catch (NullPointerException e){
+			lastErrorCode=-1; //TODO spec error code?
+			Log.e(TAG, "null mynfcv - bailed out");
 		}
 	}
 	
@@ -190,7 +210,7 @@ public class ReadNfcV extends Object implements TagTechnology {
 	/**
 	 * @return the stored afi byte
 	 */
-	public byte getAFI(){
+	public byte getAFI() throws IOException{
 		if(isTainted){ // system info not read yet
 			getSystemInformation(); // fill in the fields
 		}
@@ -210,11 +230,11 @@ public class ReadNfcV extends Object implements TagTechnology {
 		return (int)nBlocks;
 	}
 	
-	public byte[] getSystemInformation(){
+	public byte[] getSystemInformation() throws IOException{
 		if(isTainted){ // dont reread 
 			mysysinfo=transceive((byte)0x2b);
 			isTainted=false; // remember: we have read it and found it valid
-			if(0==lastErrorFlags){// no error
+			if(0==lastErrorCode){// no error
 				isTainted=false; // remember: we have read it and found it valid
 				initfields(); // analyze 
 			}}
@@ -225,15 +245,15 @@ public class ReadNfcV extends Object implements TagTechnology {
 	 * overload method transceive
 	 * @return resulting array (or error?)
 	 */
-	protected byte[] transceive(byte cmd){
+	protected byte[] transceive(byte cmd) throws IOException{
 		return transceive(cmd, -1, -1, null);
 	}
 
-	protected byte[] transceive(byte cmd, int m){
+	protected byte[] transceive(byte cmd, int m) throws IOException{
 		return transceive(cmd, m, -1, null);
 	}
 	
-	protected byte[] transceive(byte cmd, int m ,int n){
+	protected byte[] transceive(byte cmd, int m ,int n) throws IOException{
 		return transceive(cmd, m, n, null);
 	}
 	
@@ -245,14 +265,18 @@ public class ReadNfcV extends Object implements TagTechnology {
 	 * @param in input data
 	 * @return
 	 */
-	protected synchronized byte[] transceive(byte cmd,int m, int n, byte[] in){
+	protected synchronized byte[] transceive(byte cmd,int m, int n, byte[] in) throws IOException, TagLostException{
 			byte[] command;
-			byte[] res="xxxtransceive failed message".getBytes();
+			byte[] res="xxxtransceive failed messagexxx".getBytes(); // set some dummmy msgs
 			res[0]=0x42; // pos 0 holds the error flag
+			lastErrorCode=-1;
+			lastErrorString="";
 			
 		ByteArrayBuffer bab = new ByteArrayBuffer(128);
 //		bab.append(FLAG_ADDRESSED); // try addressed operations on protected tags
-		bab.append(0x00); // try addressed operations on protected tags
+		bab.append(FLAG_ZERO); // no inventory, no UID, no options
+//		bab.append(FLAG_SELECTED); // only selected Tag
+//		bab.append(FLAG_OPTION); // Meaning is defined by the command description
 		bab.append(cmd); // cmd byte
 		// 8 byte UID - or unaddressed
 //		bab.append(mynfcv.getTag().getId(), 0, 8); // what if tag is gone?
@@ -263,7 +287,7 @@ public class ReadNfcV extends Object implements TagTechnology {
 		if(null!=in)bab.append(in, 0, in.length);
 		
 		command=bab.toByteArray();
-//		Log.d(TAG,"transceive cmd: "+toHex(command));
+		Log.d(TAG,"transceive cmd: "+toHex(command));
 //		Log.d(TAG,"transceive cmd length: "+command.length);
 		
 		for(int t=0;t<=maxretry;t++){ // retry reading
@@ -273,36 +297,44 @@ public class ReadNfcV extends Object implements TagTechnology {
 				res=mynfcv.transceive(command);
 			}
 		
-		catch (TagLostException e){ //TODO roll back user action
-//			Log.e(TAG, String.format("transceive: %x",cmd) +e.getMessage());
-			Log.e(TAG,"transceive cmd: "+toHex(command)+e.getMessage());
+		catch (TagLostException e){ //TODO roll back user action? rethrow this?
+			Log.e(TAG,"transceive: TagLostEx: "+toHex(command)+e.getMessage()+toHex(res));
+/*
 			try {
-				mynfcv.close();
+				mynfcv.close(); // tag lost -> unconnect ? not necessarily
 			} catch (IOException e1) {
 				e1.printStackTrace();
 			}
-			return e.getMessage().getBytes();		
+*/
+//			return e.getMessage().getBytes();		
+			lastErrorString=e.getMessage();
+			throw(e);
 		}
 		catch (IOException e) {
 			Log.e(TAG, "transceive IOEx: "+toHex(command)+e.getMessage()+toHex(res));
 //			Log.d(TAG,"command len: "+command.length);
 //			Log.d(TAG,"maxtranslen: "+maxtrans);
 	//		e.printStackTrace();
-			return e.getMessage().getBytes();
+//			return e.getMessage().getBytes();
+			lastErrorString=e.getMessage();
+			throw(e);
+			
 		}
 		finally{
-			lastErrorFlags=res[0];
-			if(0!=lastErrorFlags){
-				lastErrorCode=res[1];
-				Log.d(TAG,"ErrorCodebyte: "+String.format("%2x", lastErrorCode));
-			}
+			Log.d(TAG,"getResponseFlags() after transceive: "+ String.format("0x%02x",mynfcv.getResponseFlags())); 
+			lastErrorCode=res[0];
+			Log.d(TAG,"ErrorCode byte: "+String.format("0x%02x", lastErrorCode));
+			Log.d(TAG,"ErrorString: "+String.format("%s", lastErrorString));
+			if(res.length<2)
+				Log.d(TAG,"(got only the ErrorCode byte)");
 		}
 
 		lastretried=t; // keep last count
-		if(0==res[0]) break;
-		Log.d(TAG,"transceive retry "+t);
+		if(0<=res[0]) break;
+		Log.d(TAG,"TTTtransceive retry "+t);
 		}
 //		Log.d(TAG,"transceive done after "+lastretried+" retries");
+//		Log.d(TAG,"connected after transceive: "+mynfcv.isConnected());
 
 		return res;
 	}
@@ -328,8 +360,6 @@ public class ReadNfcV extends Object implements TagTechnology {
 	 */
 	@Override
 	public Tag getTag() {
-		// TODO Auto-generated method stub
-		//return mytag;
 		return mynfcv.getTag();
 	}
 	
@@ -343,7 +373,7 @@ public class ReadNfcV extends Object implements TagTechnology {
 		} catch (IOException e) {
 			// TODO Auto-generated catch block
 			Log.d(TAG, "close failed: "+e.getMessage());
-			e.printStackTrace();
+//			e.printStackTrace();
 		}
 	}
 
@@ -355,9 +385,9 @@ public class ReadNfcV extends Object implements TagTechnology {
 		try {
 			mynfcv.connect();
 		} catch (IOException e) {
-			lastErrorFlags=-1; // TODO discriminate error states
+			lastErrorCode=-1; // TODO discriminate error states
 			Log.d(TAG,"connect failed: "+e.getMessage());
-			e.printStackTrace();
+//			e.printStackTrace();
 		}
 	}
 
@@ -366,16 +396,14 @@ public class ReadNfcV extends Object implements TagTechnology {
 	 */
 	@Override
 	public boolean isConnected() {
-		// TODO Auto-generated method stub
-//		mynfcv.getDsfId();
 		return mynfcv.isConnected(); // better?
 	}
 
-	public byte[] readSingleBlock(int i){
+	public byte[] readSingleBlock(int i) throws IOException{
 		byte[] read=transceive((byte)0x20,i);
 		
 		setblocktaint(i,false); // remember we read this block
-		if(0!=lastErrorFlags)return read; // TODO not so ignorant..
+		if(0!=lastErrorCode)return read; // TODO not so ignorant..
 		
 		byte[] res=new byte[read.length-1]; // drop the (0) flag byte TODO: in transceive?
 		for (int l = 0; l < read.length-1; l++) {
@@ -389,11 +417,29 @@ public class ReadNfcV extends Object implements TagTechnology {
 
 	public byte[] readMultipleBlocks(int i,int j){
 		ByteArrayBuffer bab = new ByteArrayBuffer(32);
-		
-		for(int bn=i;bn<i+j;bn++){
-			byte[] singleBlock=readSingleBlock(bn);
-			bab.append(singleBlock,0,singleBlock.length);
+		byte[] res;
+
+		try {		//first try multiblock read
+			res=ISOreadMultipleBlocks(i, j);
+			return res;
+		} catch (Exception e1) {
+			Log.d(TAG,"multi block read failed - trying single block read");
 		}
+		
+		//well, multi block doesnt work
+		
+		int maxx=0;
+		for(int bn=i;((bn<i+j)&&(maxx<20));maxx++){ // drop after maxx reads
+			byte[] singleBlock={};
+			try {
+				singleBlock = readSingleBlock(bn);
+				bab.append(singleBlock,0,singleBlock.length);
+				bn++; // count only on success
+			} catch (IOException e) {
+				
+			}
+		}
+		if(20<=maxx) return null;  // failed to read 
 		return bab.buffer();
 	}
 	
@@ -403,14 +449,14 @@ public class ReadNfcV extends Object implements TagTechnology {
 	 * @param j block count
 	 * @return block content concatenated 
 	 */
-	public byte[] ISOreadMultipleBlocks(int i,int j){
+	public byte[] ISOreadMultipleBlocks(int i,int j) throws IOException{
 		if(0==blocksize){
 			Log.e(TAG,"readMult w/o initfields?");
 			getSystemInformation(); // system info was not read yet
 		}
 
 		byte[] read = transceive((byte)0x23,i,j);
-		if(0!=read[0])return read; // error flag set: TODO  left as exercise..
+		if(0!=read[0])return read; // error flag set: left as exercise.. TODO: set error condition and return nothing
 
 		byte[] res=new byte[read.length-1]; // drop the (0) flag byte
 		for (int l = 0; l < read.length-1; l++) {
@@ -418,16 +464,17 @@ public class ReadNfcV extends Object implements TagTechnology {
 			myuserdata[i*blocksize+l]=res[l]; // sort block into our buffer
 		}
 		
-		if(res.length<j*blocksize) return read; // da fehlt was
+		if(res.length<j*blocksize){
+			Log.d(TAG,"ISOreadMultipleBlocks: warning: not all blocks were read");
+			return read; // da fehlt was TODO set error condition
+		}
 		for (int k = i; k < j; k++) { // all blocks we read
 			setblocktaint(k, false); // untaint blocks we read
-// @TODO reverting block order should be done on demand - or under user control (done again in DDMData)
-//		reverse(res,k*blocksize,blocksize); // swap string positions
 		}
 		return res;
 	}
 	
-	public byte[] getMultiSecStatus(int i,int n){
+	public byte[] getMultiSecStatus(int i,int n) throws IOException{
 		byte[] read = transceive((byte)0x2c,i,n-1);
 		Log.d(TAG,"secstatus "+toHex(read));
 		if(0!=read[0])return read;
@@ -447,14 +494,20 @@ public class ReadNfcV extends Object implements TagTechnology {
 	 * @return
 	 */
 	
-    public static String toHex(byte[] in){
-        String text=String.format("0x");
+    /**
+     * format (lowercase) hex from a byte[]
+     * @param in - a byte array 
+     * @return - a hex string
+     */
+	public static String toHex(byte[] in){
+        String text="";//String.format("0x");
+        if(null==in)return text; // dont puke on null
         for (byte  element : in) {
 			text=text.concat(String.format("%02x", element));
 		}
         return text;
     }
-
+    
 	
 	public static byte[] hexStringToByteArray(String s) {
 	    int len = s.length();
